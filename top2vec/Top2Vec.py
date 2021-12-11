@@ -1801,7 +1801,7 @@ class Top2Vec:
             else:
                 if count % interval == 0:
                     
-                    doc_top = self._threaded_calculate_documents_topic._calculate_documents_topic(topic_vectors=top_vecs,
+                    doc_top = self._threaded_calculate_documents_topic(topic_vectors=top_vecs,
                                                 document_vectors=self._get_document_vectors(),
                                                 dist=False)
                     
