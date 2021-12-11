@@ -17,7 +17,8 @@ import tempfile
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.preprocessing import normalize
 from scipy.special import softmax
-
+import handythread
+from collections import namedtuple
 try:
     import hnswlib
 
@@ -547,7 +548,7 @@ class Top2Vec:
         self._check_import_status()
         self._check_model_status()
 
-        return self._l2_normalize(np.array(self.embed([query])[0]))
+        return self._l2_normalize(np.array(self.embed(query)[0]))
 
     def _set_document_vectors(self, document_vectors):
         if self.embedding_model == 'doc2vec':
@@ -638,7 +639,67 @@ class Top2Vec:
             old2new = dict(zip(self.topic_sizes.index, range(self.topic_sizes.index.shape[0])))
             self.doc_top = np.array([old2new[i] for i in self.doc_top])
             self.topic_sizes.reset_index(drop=True, inplace=True)
-
+    @staticmethod
+    def _threaded_calculate_documents_topic(topic_vectors, document_vectors, dist=True, num_topics=None, threads = 4):
+        batch_size = 1000
+        doc_top = [None] * len(document_vectors) 
+        if dist:
+            doc_dist = []
+    
+        if document_vectors.shape[0] > batch_size:
+            
+            batches = int(document_vectors.shape[0] / batch_size)
+            extra = document_vectors.shape[0] % batch_size
+    
+            def f(ind):
+                current = ind * batch_size
+                res = np.inner(document_vectors[current:current + batch_size], topic_vectors)
+                # print(ind, current, current + batch_size)
+                if num_topics is None:
+                    doc_top[current:current + batch_size] = np.argmax(res, axis=1)
+                    if dist:
+                        doc_dist[current:current + batch_size] = np.max(res, axis=1)
+                else:
+                    doc_top[current:current + batch_size] = np.flip(np.argsort(res), axis=1)[:, :num_topics]
+                    if dist:
+                        doc_dist[current:current + batch_size] = np.flip(np.sort(res), axis=1)[:, :num_topics]
+            handythread.foreach(f, range(0, batches))
+                
+            if extra > 0:
+                extra_start  = batches * batch_size
+                res = np.inner(document_vectors[extra_start: extra_start + extra], topic_vectors)
+    
+                if num_topics is None:
+                    doc_top[extra_start: extra_start + extra] = np.argmax(res, axis=1)
+                    if dist:
+                        doc_dist[extra_start: extra_start + extra] = np.max(res, axis=1)
+                else:
+                    doc_top[extra_start: extra_start + extra] = np.flip(np.argsort(res), axis=1)[:, :num_topics]
+                    if dist:
+                        doc_dist[extra_start: extra_start + extra] = np.flip(np.sort(res), axis=1)[:, :num_topics]
+            if dist:
+                doc_dist = np.array(doc_dist)
+        else:
+            res = np.inner(document_vectors, topic_vectors)
+    
+            if num_topics is None:
+                doc_top = np.argmax(res, axis=1)
+                if dist:
+                    doc_dist = np.max(res, axis=1)
+            else:
+                doc_top = np.flip(np.argsort(res), axis=1)[:, :num_topics]
+                if dist:
+                    doc_dist = np.flip(np.sort(res), axis=1)[:, :num_topics]
+    
+        if num_topics is not None:
+            doc_top = np.array(doc_top)
+            if dist:
+                doc_dist = np.array(doc_dist)
+    
+        if dist:
+            return doc_top, doc_dist
+        else:
+            return doc_top
     @staticmethod
     def _calculate_documents_topic(topic_vectors, document_vectors, dist=True, num_topics=None):
         batch_size = 10000
@@ -1492,7 +1553,6 @@ class Top2Vec:
         self._validate_hierarchical_reduction()
 
         return self.hierarchy
-
     def hierarchical_topic_reduction(self, num_topics):
         """
         Reduce the number of topics discovered by Top2Vec.
@@ -1520,7 +1580,8 @@ class Top2Vec:
             ...]
         """
         self._validate_hierarchical_reduction_num_topics(num_topics)
-
+        
+        
         num_topics_current = self.topic_vectors.shape[0]
         top_vecs = self.topic_vectors
         top_sizes = [self.topic_sizes[i] for i in range(0, len(self.topic_sizes))]
@@ -1528,9 +1589,8 @@ class Top2Vec:
 
         count = 0
         interval = max(int(self._get_document_vectors().shape[0] / 50000), 1)
-
+        
         while num_topics_current > num_topics:
-
             # find smallest and most similar topics
             smallest = np.argmin(top_sizes)
             res = np.inner(top_vecs[smallest], top_vecs)
@@ -1556,12 +1616,15 @@ class Top2Vec:
             top_vecs = top_vecs[ix_keep]
             top_vecs = np.vstack([top_vecs, combined_vec])
             num_topics_current = top_vecs.shape[0]
-
+            import datetime
+            
             # update topics sizes
             if count % interval == 0:
-                doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
-                                                          document_vectors=self._get_document_vectors(),
-                                                          dist=False)
+                
+                doc_top = self._threaded_calculate_documents_topic(topic_vectors=top_vecs,
+                                            document_vectors=self._get_document_vectors(),
+                                            dist=False)
+                
                 topic_sizes = pd.Series(doc_top).value_counts()
                 top_sizes = [topic_sizes[i] for i in range(0, len(topic_sizes))]
 
@@ -1573,19 +1636,19 @@ class Top2Vec:
                     most_sim_size = top_sizes.pop(most_sim - 1)
                 combined_size = smallest_size + most_sim_size
                 top_sizes.append(combined_size)
-
             count += 1
 
             # update topic hierarchy
             smallest_inds = hierarchy.pop(smallest)
+            
             if most_sim < smallest:
                 most_sim_inds = hierarchy.pop(most_sim)
             else:
                 most_sim_inds = hierarchy.pop(most_sim - 1)
 
             combined_inds = smallest_inds + most_sim_inds
+            
             hierarchy.append(combined_inds)
-
         # re-calculate topic vectors from clusters
         doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
                                                   document_vectors=self._get_document_vectors(),
@@ -1610,10 +1673,192 @@ class Top2Vec:
         self._reorder_topics(hierarchy=True)
 
         return self.hierarchy
+    
+    def hierarchical_topic_reduction_with_history(self, num_topics):
+        """
+        Reduce the number of topics discovered by Top2Vec.
 
+        The most representative topics of the corpus will be found, by
+        iteratively merging each smallest topic to the most similar topic until
+        num_topics is reached.
+        
+        This keeps the history to return the model to any states in between
+        
+        Parameters
+        ----------
+        num_topics: int
+            The number of topics to reduce to.
+
+        Returns
+        -------
+        hierarchy: list of ints
+            Each index of hierarchy corresponds to the reduced topics, for each
+            reduced topic the indexes of the original topics that were merged
+            to create it are listed.
+
+            Example:
+            [[3]  <Reduced Topic 0> contains original Topic 3
+            [2,4] <Reduced Topic 1> contains original Topics 2 and 4
+            [0,1] <Reduced Topic 3> contains original Topics 0 and 1
+            ...]
+        """
+        no_reduce_num_topics = self.get_num_topics()
+        self._validate_hierarchical_reduction_num_topics(num_topics)
+        History_step = namedtuple('History_step', ['smallest', 'most_sim', 
+                                                   'smallest_size', 'most_sim_size',
+                                                   'merged_topics'])
+        # check if the step can be safed by restoring using history
+        need_initialise = True   # need initi vs load from history
+        if "_history_sized_hierarchy" not in dir(self):
+            pass
+        else:
+            if self._history_sized_hierarchy is None:
+                pass
+            else:
+                need_initialise = False
+        num_topics_current = self.topic_vectors.shape[0]
+        top_vecs = self.topic_vectors
+        top_sizes = [self.topic_sizes[i] for i in range(0, len(self.topic_sizes))]
+        hierarchy = [[i] for i in range(self.topic_vectors.shape[0])]
+        _history_sized_hierarchy = [History_step(None, None, None, None, [i]) for i in range(self.topic_vectors.shape[0])]
+        ind_to_original = [i for i in range(self.topic_vectors.shape[0])]
+        if need_initialise:
+            
+            _history_sized_hierarchy = [History_step(None, None, None, None, [i]) for i in range(self.topic_vectors.shape[0])]
+        
+            self._history_sized_hierarchy = _history_sized_hierarchy
+        else:
+            # restore state from history
+            _history_sized_hierarchy = self._history_sized_hierarchy
+            pass
+        count = 0
+        interval = max(int(self._get_document_vectors().shape[0] / 50000), 1)
+        while num_topics_current > num_topics:
+            # wind forward without re-calculation if the step already exist
+            i_step = no_reduce_num_topics - num_topics_current
+            step_has_cache = i_step + no_reduce_num_topics < len(_history_sized_hierarchy)
+            ind_to_original.append(len(_history_sized_hierarchy))
+            if step_has_cache:
+                # only need to calculated combined topic vector and combined sizes
+                step_result = _history_sized_hierarchy[i_step + no_reduce_num_topics]
+                smallest, most_sim = step_result.smallest, step_result.most_sim
+                smallest_size, most_sim_size = step_result.smallest_size, step_result.most_sim_size
+                top_vec_smallest = top_vecs[smallest]
+                top_vec_most_sim = top_vecs[most_sim]
+            else:
+                
+                # find smallest and most similar topics
+                smallest = np.argmin(top_sizes)
+                res = np.inner(top_vecs[smallest], top_vecs)
+                sims = np.flip(np.argsort(res))
+                most_sim = sims[1]
+                if most_sim == smallest:
+                    most_sim = sims[0]
+    
+                # calculate combined topic vector
+                top_vec_smallest = top_vecs[smallest]
+                smallest_size = top_sizes[smallest]
+    
+                top_vec_most_sim = top_vecs[most_sim]
+                most_sim_size = top_sizes[most_sim]
+            
+                _history_sized_hierarchy.append( 
+                                History_step(smallest=smallest, 
+                                             most_sim = most_sim,
+                                             smallest_size = smallest_size,
+                                             most_sim_size = most_sim_size,
+                                             merged_topics = [ind_to_original[smallest], ind_to_original[most_sim]]
+                                             )
+                        )
+            if smallest > most_sim :
+                rm_max, rm_min = smallest, most_sim
+            else:
+                rm_max, rm_min = smallest, most_sim
+            ind_to_original.pop(rm_max)
+            ind_to_original.pop(rm_min)
+            
+            
+            combined_vec = self._l2_normalize(((top_vec_smallest * smallest_size) +
+                                               (top_vec_most_sim * most_sim_size)) / (smallest_size + most_sim_size))
+
+            # update topic vectors
+            ix_keep = list(range(len(top_vecs)))
+            ix_keep.remove(smallest)
+            ix_keep.remove(most_sim)
+            top_vecs = top_vecs[ix_keep]
+            top_vecs = np.vstack([top_vecs, combined_vec])
+            num_topics_current = top_vecs.shape[0]
+            
+            # keep track of topic to original index mapping
+            
+            
+            
+            import datetime
+            
+            # update topics sizes
+            if step_has_cache:
+                pass
+            else:
+                if count % interval == 0:
+                    
+                    doc_top = self._threaded_calculate_documents_topic._calculate_documents_topic(topic_vectors=top_vecs,
+                                                document_vectors=self._get_document_vectors(),
+                                                dist=False)
+                    
+                    topic_sizes = pd.Series(doc_top).value_counts()
+                    top_sizes = [topic_sizes[i] for i in range(0, len(topic_sizes))]
+                    combined_size = top_sizes[-1]
+                else:
+                    smallest_size = top_sizes.pop(smallest)
+                    if most_sim < smallest:
+                        most_sim_size = top_sizes.pop(most_sim)
+                    else:
+                        most_sim_size = top_sizes.pop(most_sim - 1)
+                    combined_size = smallest_size + most_sim_size
+                    top_sizes.append(combined_size)
+            count += 1
+
+            # update topic hierarchy
+            smallest_inds = hierarchy.pop(smallest)
+            
+            if most_sim < smallest:
+                most_sim_adjusted = most_sim
+                
+            else:
+                most_sim_adjusted = most_sim - 1
+            most_sim_inds = hierarchy.pop(most_sim_adjusted)
+
+            combined_inds = smallest_inds + most_sim_inds
+
+            hierarchy.append(combined_inds)
+            
+        # re-calculate topic vectors from clusters
+        doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
+                                                  document_vectors=self._get_document_vectors(),
+                                                  dist=False)
+        self.topic_vectors_reduced = self._l2_normalize(np.vstack([self._get_document_vectors()
+                                                                   [np.where(doc_top == label)[0]]
+                                                                  .mean(axis=0) for label in set(doc_top)]))
+
+        self.hierarchy = hierarchy
+        
+        # assign documents to topic
+        self.doc_top_reduced, self.doc_dist_reduced = self._calculate_documents_topic(self.topic_vectors_reduced,
+                                                                                      self._get_document_vectors())
+        # find topic words and scores
+        self.topic_words_reduced, self.topic_word_scores_reduced = self._find_topic_words_and_scores(
+            topic_vectors=self.topic_vectors_reduced)
+
+        # calculate topic sizes
+        self.topic_sizes_reduced = self._calculate_topic_sizes(hierarchy=True)
+
+        # re-order topics
+        self._reorder_topics(hierarchy=True)
+
+        return self.hierarchy
     def query_documents(self, query, num_docs, return_documents=True, use_index=False, ef=None, tokenizer=None):
         """
-        Semantic search of documents using a text query.
+        Semantic search of documents using a query.
 
         The most semantically similar documents to the query will be returned.
 
@@ -1689,7 +1934,7 @@ class Top2Vec:
 
     def query_topics(self, query, num_topics, reduced=False, tokenizer=None):
         """
-        Semantic search of topics using text query.
+        Semantic search of topics using keywords.
 
         These are the topics closest to the vector. Topics are ordered by
         proximity to the vector. Successive topics in the list are less
