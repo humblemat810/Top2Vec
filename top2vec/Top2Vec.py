@@ -47,7 +47,9 @@ logger.setLevel(logging.WARNING)
 sh = logging.StreamHandler()
 sh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(sh)
-
+History_step = namedtuple('History_step', ['smallest', 'most_sim', 
+                                                   'smallest_size', 'most_sim_size',
+                                                   'merged_topics'])
 
 def default_tokenizer(doc):
     """Tokenize documents for training and remove too long/short words"""
@@ -1704,9 +1706,7 @@ class Top2Vec:
         """
         no_reduce_num_topics = self.get_num_topics()
         self._validate_hierarchical_reduction_num_topics(num_topics)
-        History_step = namedtuple('History_step', ['smallest', 'most_sim', 
-                                                   'smallest_size', 'most_sim_size',
-                                                   'merged_topics'])
+        
         # check if the step can be safed by restoring using history
         need_initialise = True   # need initi vs load from history
         if "_history_sized_hierarchy" not in dir(self):
@@ -1734,6 +1734,8 @@ class Top2Vec:
         count = 0
         interval = max(int(self._get_document_vectors().shape[0] / 50000), 1)
         while num_topics_current > num_topics:
+            if num_topics_current % 100 == 0:
+                print("num_topics_current : ", num_topics_current)
             # wind forward without re-calculation if the step already exist
             i_step = no_reduce_num_topics - num_topics_current
             step_has_cache = i_step + no_reduce_num_topics < len(_history_sized_hierarchy)
