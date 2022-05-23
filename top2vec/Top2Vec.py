@@ -415,7 +415,7 @@ class Top2Vec:
         self.serialized_word_index = None
         self.words_indexed = False
 
-    def save(self, file):
+    def save(self, file, compression=None):
         """
         Saves the current model to the specified file.
 
@@ -423,6 +423,8 @@ class Top2Vec:
         ----------
         file: str
             File where model will be saved.
+        compression: str
+            "lzma" (slow, efficient), "zlib" (fast, less efficient) or None (default).
         """
 
         document_index_temp = None
@@ -450,7 +452,7 @@ class Top2Vec:
             word_index_temp = self.word_index
             self.word_index = None
 
-        dump(self, file)
+        dump(self, file, compress=compression)
 
         self.document_index = document_index_temp
         self.word_index = word_index_temp
